@@ -1,0 +1,316 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Recepción de Mercancías</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+</head>
+<body class="bg-gray-100 min-h-screen flex flex-col items-center p-4">
+    <div class="w-full max-w-2xl bg-white shadow-md rounded-lg p-6">
+        <h1 class="text-2xl font-bold text-center mb-6">Recepción de Mercancías</h1>
+
+        <!-- Formulario de proyecto -->
+        <div class="mb-6">
+            <h2 class="text-lg font-semibold mb-2">Configuración del Proyecto</h2>
+            <div class="space-y-4">
+                <input type="text" id="projectName" placeholder="Nombre del Proyecto" class="w-full p-2 border rounded">
+                <input type="text" id="inspectorName" placeholder="Nombre del Inspector" class="w-full p-2 border rounded">
+                <input type="date" id="inspectionDate" class="w-full p-2 border rounded" value="">
+                <button onclick="setProjectDetails()" class="w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600">Establecer Proyecto</button>
+            </div>
+        </div>
+
+        <!-- Formulario de recepción de productos -->
+        <div id="productForm" class="mb-6 hidden">
+            <h2 class="text-lg font-semibold mb-2">Registrar Producto (Proyecto: <span id="currentProject"></span>)</h2>
+            <div class="space-y-4">
+                <input type="text" id="serialNumber" placeholder="Número de Serie (SN)" class="w-full p-2 border rounded">
+                <input type="number" id="quantity" placeholder="Cantidad" min="1" class="w-full p-2 border rounded">
+                <select id="condition" class="w-full p-2 border rounded" onchange="updatePhotoLimit()">
+                    <option value="Bueno">Bueno</option>
+                    <option value="Dañado">Dañado</option>
+                </select>
+                <input type="file" id="damagePhotos" accept="image/*" capture="camera" multiple class="w-full p-2 border rounded">
+                <p id="photoLimitText" class="text-sm text-gray-500">Seleccione hasta 5 fotos para el producto.</p>
+                <textarea id="comments" placeholder="Comentarios" class="w-full p-2 border rounded"></textarea>
+                <button onclick="addProduct()" class="w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600">Registrar Producto</button>
+            </div>
+        </div>
+
+        <!-- Lista de productos registrados -->
+        <div class="mb-6">
+            <h2 class="text-lg font-semibold mb-2">Productos Registrados</h2>
+            <div id="productList" class="space-y-4"></div>
+        </div>
+
+        <!-- Botón para generar reporte -->
+        <button onclick="generateReport()" class="w-full bg-green-500 text-white p-2 rounded hover:bg-green-600">Generar Reporte (PDF)</button>
+
+        <!-- Área para mostrar el reporte -->
+        <div id="report" class="mt-6 hidden">
+            <h2 class="text-lg font-semibold mb-2">Reporte de Recepción</h2>
+            <div id="reportContent" class="space-y-4"></div>
+        </div>
+    </div>
+
+    <script>
+        let products = JSON.parse(localStorage.getItem('products')) || [];
+        let currentProject = null;
+        let currentInspector = null;
+        let currentInspectionDate = null;
+
+        // Set default date to today
+        document.getElementById('inspectionDate').value = new Date().toISOString().split('T')[0];
+
+        function updatePhotoLimit() {
+            const condition = document.getElementById('condition').value;
+            const photoLimitText = document.getElementById('photoLimitText');
+            photoLimitText.textContent = condition === 'Bueno' ? 
+                'Seleccione hasta 5 fotos para el producto.' : 
+                'Seleccione hasta 20 fotos para el producto.';
+        }
+
+        function setProjectDetails() {
+            currentProject = document.getElementById('projectName').value.trim();
+            currentInspector = document.getElementById('inspectorName').value.trim();
+            currentInspectionDate = document.getElementById('inspectionDate').value;
+
+            if (!currentProject || !currentInspector || !currentInspectionDate) {
+                alert('Por favor, complete todos los campos: Nombre del Proyecto, Nombre del Inspector y Fecha de Inspección.');
+                return;
+            }
+
+            document.getElementById('currentProject').textContent = currentProject;
+            document.getElementById('productForm').classList.remove('hidden');
+            document.getElementById('projectName').disabled = true;
+            document.getElementById('inspectorName').disabled = true;
+            document.getElementById('inspectionDate').disabled = true;
+            document.getElementById('serialNumber').focus();
+            updatePhotoLimit();
+        }
+
+        function addProduct() {
+            if (!currentProject) {
+                alert('Por favor, establezca los detalles del proyecto primero.');
+                return;
+            }
+
+            const serialNumber = document.getElementById('serialNumber').value.trim();
+            const quantity = parseInt(document.getElementById('quantity').value) || 1;
+            const condition = document.getElementById('condition').value;
+            const damagePhotos = document.getElementById('damagePhotos').files;
+            const comments = document.getElementById('comments').value.trim();
+            const maxPhotos = condition === 'Bueno' ? 5 : 20;
+
+            if (!serialNumber) {
+                alert('Por favor, ingrese un número de serie.');
+                return;
+            }
+
+            if (damagePhotos.length > maxPhotos) {
+                alert(`No puede subir más de ${maxPhotos} fotos para un producto ${condition}.`);
+                return;
+            }
+
+            if (damagePhotos.length > 0) {
+                const photoData = [];
+                let loadedPhotos = 0;
+                for (let i = 0; i < Math.min(damagePhotos.length, maxPhotos); i++) {
+                    const reader = new FileReader();
+                    reader.onload = function(e) {
+                        photoData.push(e.target.result);
+                        loadedPhotos++;
+                        if (loadedPhotos === Math.min(damagePhotos.length, maxPhotos)) {
+                            saveProduct(serialNumber, quantity, condition, photoData, comments);
+                        }
+                    };
+                    reader.readAsDataURL(damagePhotos[i]);
+                }
+            } else {
+                saveProduct(serialNumber, quantity, condition, [], comments);
+            }
+        }
+
+        function saveProduct(serialNumber, quantity, condition, photoData, comments) {
+            const product = {
+                serialNumber,
+                quantity,
+                condition,
+                photoData,
+                comments,
+                inspectionDate: currentInspectionDate,
+                projectName: currentProject,
+                inspectorName: currentInspector,
+                timestamp: new Date().toLocaleString('es-ES', { timeZone: 'Europe/Madrid' })
+            };
+            products.push(product);
+            localStorage.setItem('products', JSON.stringify(products));
+            document.getElementById('serialNumber').value = '';
+            document.getElementById('quantity').value = '';
+            document.getElementById('condition').value = 'Bueno';
+            document.getElementById('damagePhotos').value = '';
+            document.getElementById('comments').value = '';
+            updatePhotoLimit();
+            renderProductList();
+        }
+
+        function renderProductList() {
+            const productList = document.getElementById('productList');
+            productList.innerHTML = '';
+            const projects = {};
+            products.forEach((product, index) => {
+                if (!projects[product.projectName]) {
+                    projects[product.projectName] = [];
+                }
+                projects[product.projectName].push({ product, index });
+            });
+
+            for (const project in projects) {
+                const projectDiv = document.createElement('div');
+                projectDiv.className = 'border p-4 rounded mb-4';
+                projectDiv.innerHTML = `<h3 class="text-lg font-semibold mb-2">Proyecto: ${project}</h3>`;
+                const productContainer = document.createElement('div');
+                productContainer.className = 'space-y-4';
+                projects[project].forEach(({ product, index }) => {
+                    const photosHtml = product.photoData.map(photo => 
+                        `<img src="${photo}" class="w-24 h-24 object-cover mt-2 inline-block mr-2" alt="Foto de daño">`
+                    ).join('');
+                    const productDiv = document.createElement('div');
+                    productDiv.className = 'border p-4 rounded flex justify-between items-center';
+                    productDiv.innerHTML = `
+                        <div>
+                            <p><strong>SN:</strong> ${product.serialNumber}</p>
+                            <p><strong>Cantidad:</strong> ${product.quantity}</p>
+                            <p><strong>Estado:</strong> ${product.condition}</p>
+                            <p><strong>Comentarios:</strong> ${product.comments || 'Ninguno'}</p>
+                            <p><strong>Fecha de Inspección:</strong> ${product.inspectionDate}</p>
+                            <p><strong>Inspector:</strong> ${product.inspectorName}</p>
+                            <p><strong>Fecha de Registro:</strong> ${product.timestamp}</p>
+                            <div class="flex flex-wrap">${photosHtml}</div>
+                        </div>
+                        <button onclick="deleteProduct(${index})" class="bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600">Eliminar</button>
+                    `;
+                    productContainer.appendChild(productDiv);
+                });
+                projectDiv.appendChild(productContainer);
+                productList.appendChild(projectDiv);
+            }
+        }
+
+        function deleteProduct(index) {
+            if (confirm('¿Eliminar este producto?')) {
+                products.splice(index, 1);
+                localStorage.setItem('products', JSON.stringify(products));
+                renderProductList();
+            }
+        }
+
+        async function generateReport() {
+            const report = document.getElementById('report');
+            const reportContent = document.getElementById('reportContent');
+            report.classList.remove('hidden');
+            reportContent.innerHTML = '';
+            const projects = {};
+            products.forEach(product => {
+                if (!projects[product.projectName]) {
+                    projects[product.projectName] = [];
+                }
+                projects[product.projectName].push(product);
+            });
+
+            for (const project in projects) {
+                const projectDiv = document.createElement('div');
+                projectDiv.className = 'border p-4 rounded mb-4';
+                projectDiv.innerHTML = `<h3 class="text-lg font-semibold mb-2">Proyecto: ${project}</h3>`;
+                const productContainer = document.createElement('div');
+                productContainer.className = 'space-y-4';
+                projects[project].forEach(product => {
+                    const photosHtml = product.photoData.map(photo => 
+                        `<img src="${photo}" class="w-32 h-32 object-cover mt-2 inline-block mr-2" alt="Foto de daño">`
+                    ).join('');
+                    const reportItem = document.createElement('div');
+                    reportItem.className = 'border p-4 rounded';
+                    reportItem.innerHTML = `
+                        <p><strong>SN:</strong> ${product.serialNumber}</p>
+                        <p><strong>Cantidad:</strong> ${product.quantity}</p>
+                        <p><strong>Estado:</strong> ${product.condition}</p>
+                        <p><strong>Comentarios:</strong> ${product.comments || 'Ninguno'}</p>
+                        <p><strong>Fecha de Inspección:</strong> ${product.inspectionDate}</p>
+                        <p><strong>Inspector:</strong> ${product.inspectorName}</p>
+                        <p><strong>Fecha de Registro:</strong> ${product.timestamp}</p>
+                        <div class="flex flex-wrap">${photosHtml}</div>
+                    `;
+                    productContainer.appendChild(reportItem);
+                });
+                projectDiv.appendChild(productContainer);
+                reportContent.appendChild(projectDiv);
+            }
+
+            // Generate PDF
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+            const element = document.getElementById('report');
+            try {
+                const canvas = await html2canvas(element, { scale: 2 });
+                const imgData = canvas.toDataURL('image/png');
+                const imgProps = doc.getImageProperties(imgData);
+                const pdfWidth = doc.internal.pageSize.getWidth();
+                const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+                doc.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+                doc.save(`Reporte_Recepción_${new Date().toISOString().split('T')[0]}.pdf`);
+                alert('Reporte PDF generado y descargado.');
+            } catch (error) {
+                alert('Error al generar el PDF: ' + error.message);
+            }
+        }
+
+        // Cargar lista inicial
+        renderProductList();
+    </script>
+</body>
+</html>
